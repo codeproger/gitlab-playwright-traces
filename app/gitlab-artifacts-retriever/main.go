@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"gitlab-artifacts-retriever/app/gitlab-artifacts-retriever/templates"
+	"github.com/codeproger/gitlab-playwright-traces/app/gitlab-artifacts-retriever/templates"
 	"html/template"
 	"io"
 	"io/ioutil"
