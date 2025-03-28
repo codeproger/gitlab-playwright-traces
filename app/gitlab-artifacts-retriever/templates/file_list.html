@@ -1,0 +1,27 @@
+{{define "file_list"}}
+<h2 class="mb-3">Список файлов</h2>
+
+{{if .Files}}
+    {{range .Files}}
+    <div class="file-item">
+        <div class="file-info">
+            <div class="file-name">{{.Name}}</div>
+            <div class="file-size">{{.Size}}</div>
+        </div>
+        <div class="text-muted mb-2">{{.Path}}</div>
+        <div class="actions">
+            <a href="{{.DownloadURL}}" class="btn btn-primary btn-sm" target="_blank">
+                Скачать
+            </a>
+            <a href="{{.PlaywrightURL}}" class="btn btn-success btn-sm" target="_blank">
+                Просмотреть трейс
+            </a>
+        </div>
+    </div>
+    {{end}}
+{{else}}
+    <div class="alert alert-info">
+        Файлы не найдены
+    </div>
+{{end}}
+{{end}} 

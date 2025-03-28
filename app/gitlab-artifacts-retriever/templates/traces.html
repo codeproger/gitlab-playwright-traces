@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTMX Просмотрщик Артефактов</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <!-- HTMX -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/1.9.6/htmx.min.js"></script>
+    <style>
+        .file-item {
+            border: 1px solid #e9ecef;
+            border-radius: 6px;
+            margin-bottom: 12px;
+            padding: 12px;
+            background-color: #f8f9fa;
+        }
+        .file-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .file-name {
+            font-weight: bold;
+            word-break: break-word;
+        }
+        .file-size {
+            white-space: nowrap;
+            margin-left: 12px;
+        }
+        .actions {
+            display: flex;
+            gap: 10px;
+        }
+        #download-progress {
+            display: none;
+            margin-top: 1rem;
+        }
+        .progress {
+            height: 1.5rem;
+        }
+        #download-status {
+            margin-top: 0.5rem;
+            font-size: 0.9rem;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+<div class="container py-4">
+    <h1 class="mb-4">Просмотр артефактов Playwright</h1>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <form hx-get="/files/"
+                  hx-target="#files-container"
+                  hx-indicator="#loading"
+                  hx-trigger="submit"
+                  hx-include="[name='projectId'], [name='pipelineId']">
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <label for="projectId" class="form-label">Project ID</label>
+                        <input type="text" class="form-control" id="projectId" name="projectId" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="pipelineId" class="form-label">Job ID</label>
+                        <input type="text" class="form-control" id="pipelineId" name="pipelineId" required>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary">Загрузить</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="download-progress">
+        <div class="progress mb-2">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                 role="progressbar" 
+                 style="width: 0%" 
+                 id="progress-bar">0%</div>
+        </div>
+        <div id="download-status">Подготовка к загрузке...</div>
+    </div>
+
+    <div id="loading" class="htmx-indicator">
+        <div class="d-flex justify-content-center">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Загрузка...</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="files-container"></div>
+</div>
+
+<script>
+    let currentEventSource = null;
+
+    // Парсинг GET-параметров при загрузке страницы
+    document.addEventListener('DOMContentLoaded', function() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const projectId = urlParams.get('projectId');
+        const pipelineId = urlParams.get('pipelineId');
+
+        if (projectId) {
+            document.getElementById('projectId').value = projectId;
+        }
+
+        if (pipelineId) {
+            document.getElementById('pipelineId').value = pipelineId;
+        }
+
+        // Если оба параметра присутствуют, автоматически отправляем запрос
+        if (projectId && pipelineId) {
+            const form = document.querySelector('form');
+            form.dispatchEvent(new Event('submit'));
+        }
+    });
+
+    // Обработка событий SSE для обновления прогресса
+    document.body.addEventListener('htmx:beforeRequest', function(evt) {
+        const form = evt.detail.elt;
+        const projectId = form.querySelector('[name="projectId"]').value;
+        const pipelineId = form.querySelector('[name="pipelineId"]').value;
+
+        // Закрываем предыдущее SSE соединение, если оно есть
+        if (currentEventSource) {
+            currentEventSource.close();
+        }
+
+        // Показываем прогресс
+        document.getElementById('download-progress').style.display = 'block';
+        document.getElementById('progress-bar').style.width = '0%';
+        document.getElementById('progress-bar').textContent = '0%';
+        document.getElementById('download-status').textContent = 'Подготовка к загрузке...';
+
+        // Подключаемся к SSE
+        currentEventSource = new EventSource(`/progress?projectId=${projectId}&pipelineId=${pipelineId}`);
+
+        currentEventSource.onmessage = function(event) {
+            const update = JSON.parse(event.data);
+            const progressBar = document.getElementById('progress-bar');
+            const downloadStatus = document.getElementById('download-status');
+
+            progressBar.style.width = `${update.progress}%`;
+            progressBar.textContent = `${Math.round(update.progress)}%`;
+            downloadStatus.textContent = update.status;
+
+            if (update.progress >= 100 || update.status.includes('Error')) {
+                currentEventSource.close();
+                currentEventSource = null;
+            }
+        };
+
+        currentEventSource.onerror = function() {
+            currentEventSource.close();
+            currentEventSource = null;
+            document.getElementById('download-progress').style.display = 'none';
+        };
+    });
+
+    // Очищаем SSE при завершении запроса
+    document.body.addEventListener('htmx:afterRequest', function(evt) {
+        if (evt.detail.successful) {
+            if (currentEventSource) {
+                currentEventSource.close();
+                currentEventSource = null;
+            }
+            document.getElementById('download-progress').style.display = 'none';
+        }
+    });
+</script>
+</body>
+</html>
