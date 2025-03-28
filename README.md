@@ -37,11 +37,12 @@ cd gitlab-artifacts-retriever
 cp .env.example .env
 ```
 
-Отредактируйте `.env` файл, указав ваш GitLab API token:
+Отредактируйте `.env` файл, указав ваш GitLab API token и URL Playwright:
 
 ```
 GITLAB_TOKEN=your_personal_access_token_here
 GITLAB_URL=https://gitlab.com  # или URL вашего GitLab сервера
+PLAYWRIGHT_URL=https://trace.playwright.dev/  # или URL вашего Playwright сервера
 ```
 
 ## Использование
@@ -122,6 +123,7 @@ Found 3 artifacts in /output/trace for job 12345:
 | Команда | Описание |
 |---------|----------|
 | `make build` | Сборка Docker образа |
+| `make build-go` | Сборка Go приложения |
 | `make run JOB_ID=12345 PROJECT_ID=67890` | Запуск приложения в Docker |
 | `make extract` | Извлечение бинарного файла из Docker образа |
 | `make clean` | Очистка скомпилированных файлов и Docker образов |
