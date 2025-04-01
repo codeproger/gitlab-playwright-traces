@@ -11,7 +11,7 @@ help:
 	@echo "Available commands:"
 	@echo "  make build                                 - Build Docker image"
 	@echo "  make build-go                              - Build Go application"
-	@echo "  make run JOB_ID=12345 PROJECT_ID=67890     - Run the application in Docker (requires JOB_ID and PROJECT_ID)"
+	@echo "  make                                       - Run the application in Docker"
 	@echo "  make extract                               - Extract binary from Docker image to local filesystem"
 	@echo "  make clean                                 - Remove build artefact and Docker images"
 
