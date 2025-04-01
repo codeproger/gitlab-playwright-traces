@@ -1,7 +1,7 @@
 .PHONY: build run clean help
 
 # Application name
-APP_NAME=gitlab-artifacts-retriever
+APP_NAME=gitlab-playwright-traces
 
 # Load environment variables from .env file
 include .env
@@ -13,7 +13,7 @@ help:
 	@echo "  make build-go                              - Build Go application"
 	@echo "  make run JOB_ID=12345 PROJECT_ID=67890     - Run the application in Docker (requires JOB_ID and PROJECT_ID)"
 	@echo "  make extract                               - Extract binary from Docker image to local filesystem"
-	@echo "  make clean                                 - Remove build artifacts and Docker images"
+	@echo "  make clean                                 - Remove build artefact and Docker images"
 
 # Build Docker image
 build:
@@ -24,19 +24,11 @@ build:
 # Build Go application
 build-go:
 	@echo "Building Go application..."
-	GOOS=linux GOARCH=amd64 go build -o $(APP_NAME) ./app/gitlab-artifacts-retriever
+	GOOS=linux GOARCH=amd64 go build -o $(APP_NAME) ./cmd
 	@echo "Go build complete!"
 
 # Run application in Docker
 run:
-	@if [ -z "$(JOB_ID)" ]; then \
-		echo "Error: JOB_ID is required. Use: make run JOB_ID=12345 PROJECT_ID=67890"; \
-		exit 1; \
-	fi
-	@if [ -z "$(PROJECT_ID)" ]; then \
-		echo "Error: PROJECT_ID is required. Use: make run JOB_ID=12345 PROJECT_ID=67890"; \
-		exit 1; \
-	fi
 	@if [ -z "$(GITLAB_TOKEN)" ]; then \
 		echo "Error: GITLAB_TOKEN is not set in .env file or environment"; \
 		exit 1; \
@@ -46,7 +38,15 @@ run:
 		exit 1; \
 	fi
 	@echo "Running application in Docker..."
-	docker run --rm -e GITLAB_TOKEN=$(GITLAB_TOKEN) -e PLAYWRIGHT_URL=$(PLAYWRIGHT_URL) $(APP_NAME):latest --job=$(JOB_ID) --project=$(PROJECT_ID) --url=$(GITLAB_URL)
+	docker run --rm \
+		-p $(HTTP_PORT):8080 \
+		-e GITLAB_TOKEN=$(GITLAB_TOKEN) \
+		-e PLAYWRIGHT_URL=$(PLAYWRIGHT_URL) \
+		$(APP_NAME):latest \
+		-token=$(GITLAB_TOKEN) \
+		-url=$(GITLAB_URL) \
+		-http-port=8080 \
+		-log=0
 
 # Extract binary from Docker image
 extract:
@@ -57,7 +57,7 @@ extract:
 	@echo "Binary extracted to ./$(APP_NAME)"
 	@echo "You can run it with: ./$(APP_NAME) --job=JOB_ID --token=TOKEN"
 
-# Clean all build artifacts and Docker images
+# Clean all build artefact and Docker images
 clean:
 	@echo "Cleaning up..."
 	rm -f $(APP_NAME)

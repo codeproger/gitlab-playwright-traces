@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/codeproger/gitlab-playwright-traces/cmd/templates"
 	"html/template"
 	"io"
 	"io/ioutil"
@@ -18,13 +17,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/codeproger/gitlab-playwright-traces/cmd/templates"
 )
 
 // Структуры для нового расширенного формата
@@ -252,9 +252,8 @@ type ProgressUpdate struct {
 func loadTemplates() (*template.Template, error) {
 	tmpl := template.New("")
 
-	// Get the directory of the current source file
-	_, filename, _, _ := runtime.Caller(0)
-	templateDir := filepath.Join(filepath.Dir(filename), "templates")
+	// Look for templates in the current working directory
+	templateDir := "templates"
 
 	// Load all template files
 	err := filepath.Walk(templateDir, func(path string, info os.FileInfo, err error) error {
@@ -280,7 +279,6 @@ func main() {
 	var gitlabURL string
 	var logLevel int
 	var httpPort int
-	// Add this to your environment configuration at the top of main()
 	var playwrightURL string
 
 	// Parse command-line arguments
@@ -311,16 +309,9 @@ func main() {
 		Timeout: 30 * time.Second,
 	}
 
-	// Create a context that can be cancelled
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	// Create a channel to receive shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	// Create error channel for server
-	errChan := make(chan error, 1)
 
 	// Create server
 	mux, err := setupRoutes(client, gitlabURL, gitlabToken, playwrightURL)
@@ -334,6 +325,9 @@ func main() {
 		Handler: mux,
 	}
 
+	// Create a channel for server errors
+	errChan := make(chan error, 1)
+
 	// Start HTTP server in a goroutine
 	go func() {
 		fmt.Printf("Starting HTTP server on port %d...\n", httpPort)
@@ -342,36 +336,23 @@ func main() {
 		}
 	}()
 
-	// Wait for signals in a loop
-	for {
-		select {
-		case <-ctx.Done():
-			// Context was cancelled, clean up and exit
-			fmt.Println("Context cancelled, shutting down...")
-			server.Shutdown(context.Background())
-			return
+	// Wait for signals
+	select {
+	case <-sigChan:
+		fmt.Println("\nShutdown signal received, stopping server...")
+		// Create a context with timeout for graceful shutdown
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-		case <-sigChan:
-			fmt.Println("\nShutdown signal received...")
-			// Continue running unless it's a second signal
-			signal.Reset(os.Interrupt, syscall.SIGTERM)
-			fmt.Println("Send signal again to force stop")
+		if err := server.Shutdown(ctx); err != nil {
+			fmt.Printf("Error during server shutdown: %v\n", err)
+		}
+		return
 
-			// Set up a new signal handler for force stop
-			go func() {
-				<-sigChan
-				fmt.Println("\nForce stopping server...")
-				server.Close()
-				cancel()
-			}()
-
-		case err := <-errChan:
-			if err != nil {
-				fmt.Printf("Server error: %v\n", err)
-				server.Close()
-				cancel()
-				os.Exit(1)
-			}
+	case err := <-errChan:
+		if err != nil {
+			fmt.Printf("Server error: %v\n", err)
+			os.Exit(1)
 		}
 	}
 }
@@ -389,9 +370,7 @@ func setupRoutes(client *http.Client, gitlabURL, token, playwrightURL string) (*
 	// Serve traces page
 	mux.HandleFunc("/traces", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			// Get the directory of the current source file
-			_, filename, _, _ := runtime.Caller(0)
-			templatePath := filepath.Join(filepath.Dir(filename), "templates", "traces.html")
+			templatePath := filepath.Join("templates", "traces.html")
 
 			html, err := ioutil.ReadFile(templatePath)
 			if err != nil {
