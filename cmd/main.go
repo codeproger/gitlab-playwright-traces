@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
+	"log"
 	"math"
 	"net/http"
 	"net/http/httputil"
@@ -261,7 +261,7 @@ func loadTemplates() (*template.Template, error) {
 			return err
 		}
 		if !info.IsDir() && strings.HasSuffix(path, ".html") {
-			content, err := ioutil.ReadFile(path)
+			content, err := os.ReadFile(path)
 			if err != nil {
 				return err
 			}
@@ -308,6 +308,9 @@ func main() {
 		},
 		Timeout: 30 * time.Second,
 	}
+
+	// Check GitLab version for tree API support
+	checkGitLabVersion(client, gitlabURL, gitlabToken)
 
 	// Create a channel to receive shutdown signals
 	sigChan := make(chan os.Signal, 1)
@@ -372,7 +375,7 @@ func setupRoutes(client *http.Client, gitlabURL, token, playwrightURL string) (*
 		if r.Method == http.MethodGet {
 			templatePath := filepath.Join("templates", "traces.html")
 
-			html, err := ioutil.ReadFile(templatePath)
+			html, err := os.ReadFile(templatePath)
 			if err != nil {
 				fmt.Printf("Error reading template: %v\n", err)
 				http.Error(w, "Error reading template", http.StatusInternalServerError)
@@ -824,11 +827,11 @@ func getJobExtendedDetails(client *http.Client, gitlabURL, token string, project
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("API request failed with status: %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -897,11 +900,13 @@ func getFileArtifactURL(gitlabURL string, projectID, jobID int, filePath string)
 	return fmt.Sprintf("%s/api/v4/projects/%d/jobs/%d/artifacts/%s", gitlabURL, projectID, jobID, encodedPath)
 }
 
-// Update downloadAndListArtifacts to accept a progress channel
+// downloadAndListArtifacts tries three strategies to get the artifact file list:
+// 1. GitLab /artifacts/tree API (GitLab 18.8+) — no download needed
+// 2. HTTP Range requests + ZIP Central Directory — downloads ~1MB instead of the full archive
+// 3. Full archive download — fallback, current behavior
 func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, projectID, jobID int, progressChan chan<- ProgressUpdate) ([]string, map[string]FileInfo, error) {
 	// Try to get from cache first
 	if files, fileInfo, ok := fileCache.Get(projectID, jobID); ok {
-		// Check if there are any trace files in the cached data
 		hasTraces := false
 		for _, file := range files {
 			if strings.HasPrefix(file, "output/trace") && strings.HasSuffix(file, ".zip") {
@@ -919,25 +924,75 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 	}
 
 	if progressChan != nil {
-		progressChan <- ProgressUpdate{Progress: 0, Status: "Starting download..."}
+		progressChan <- ProgressUpdate{Progress: 0, Status: "Fetching artifact list..."}
+	}
+
+	// Strategy 1: GitLab /artifacts/tree API (GitLab 18.8+)
+	fileList, fileInfoMap, err := listArtifactsViaTree(client, gitlabURL, token, projectID, jobID)
+	if err != nil {
+		log.Printf("Tree API unavailable: %v, trying Range...\n", err)
+
+		// Strategy 2: HTTP Range + ZIP Central Directory
+		fileList, fileInfoMap, err = listArtifactsViaRange(client, gitlabURL, token, projectID, jobID)
+		if err != nil {
+			log.Printf("Range listing failed: %v, falling back to full download\n", err)
+
+			// Strategy 3: full archive download (original behavior)
+			fileList, fileInfoMap, err = downloadAndListArtifactsFull(client, gitlabURL, token, projectID, jobID, progressChan)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+
+	// Validate that trace files exist
+	hasTraces := false
+	for _, file := range fileList {
+		if strings.HasPrefix(file, "output/trace") && strings.HasSuffix(file, ".zip") {
+			hasTraces = true
+			break
+		}
+	}
+
+	if !hasTraces {
+		log.Printf("No trace files found in artifacts. Total files: %d\n", len(fileList))
+		return nil, nil, fmt.Errorf("no trace files found in artifacts")
+	}
+
+	// Store in cache
+	fileCache.Set(projectID, jobID, fileList, fileInfoMap)
+
+	if progressChan != nil {
+		progressChan <- ProgressUpdate{Progress: 100, Status: "Listing complete"}
+	}
+
+	return fileList, fileInfoMap, nil
+}
+
+// downloadAndListArtifactsFull downloads the entire artifact archive and extracts the file list.
+// This is the original (fallback) strategy used when tree API and Range requests are unavailable.
+func downloadAndListArtifactsFull(client *http.Client, gitlabURL, token string, projectID, jobID int, progressChan chan<- ProgressUpdate) ([]string, map[string]FileInfo, error) {
+	if progressChan != nil {
+		progressChan <- ProgressUpdate{Progress: 0, Status: "Starting full download..."}
 	}
 
 	// Create a temporary file for storing the zip archive
-	tmpFile, err := ioutil.TempFile("", "artifacts-*.zip")
+	tmpFile, err := os.CreateTemp("", "artifacts-*.zip")
 	if err != nil {
 		return nil, nil, err
 	}
-	defer os.Remove(tmpFile.Name()) // Clean up when we're done
+	defer os.Remove(tmpFile.Name())
 	defer tmpFile.Close()
 
 	// If not in cache, download and process
 	apiURL := fmt.Sprintf("%s/api/v4/projects/%d/jobs/%d/artifacts", gitlabURL, projectID, jobID)
+	log.Printf("Full download: fetching artifacts from: %s\n", apiURL)
 
 	// Set up a longer timeout client for downloading large files
 	downloadClient := &http.Client{
-		Timeout: 30 * time.Minute, // Much longer timeout for large downloads
+		Timeout: 30 * time.Minute,
 		Transport: &http.Transport{
-			DisableCompression:  true, // Avoid overhead of decompression for zip files
+			DisableCompression:  true,
 			MaxIdleConns:        10,
 			IdleConnTimeout:     30 * time.Second,
 			TLSHandshakeTimeout: 10 * time.Second,
@@ -972,10 +1027,9 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 				progressChan <- ProgressUpdate{Progress: float64(totalWritten) * 100 / float64(fileSize),
 					Status: fmt.Sprintf("Retry attempt %d/%d after timeout...", attempt+1, maxRetries)}
 			}
-			time.Sleep(2 * time.Second) // Brief pause before retry
+			time.Sleep(2 * time.Second)
 		}
 
-		// Create request with Range header if resuming
 		req, err := http.NewRequest("GET", apiURL, nil)
 		if err != nil {
 			return nil, nil, err
@@ -983,7 +1037,6 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 
 		req.Header.Set("PRIVATE-TOKEN", token)
 
-		// If we have partial content, set Range header
 		if totalWritten > 0 {
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", totalWritten))
 			if progressChan != nil {
@@ -992,7 +1045,6 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 			}
 		}
 
-		// Use context with timeout for better control
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
 
@@ -1013,17 +1065,14 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			// Read only part of error response
 			bodyBytes := make([]byte, 1024)
 			n, _ := resp.Body.Read(bodyBytes)
 			return nil, nil, fmt.Errorf("artifacts download failed with status: %d, body: %s",
 				resp.StatusCode, string(bodyBytes[:n]))
 		}
 
-		// Calculate start position based on status code
 		startPos := totalWritten
 		if resp.StatusCode == http.StatusOK {
-			// Server didn't honor Range request, need to restart
 			if totalWritten > 0 {
 				tmpFile.Truncate(0)
 				tmpFile.Seek(0, 0)
@@ -1031,8 +1080,7 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 			}
 		}
 
-		// Copy data with progress reporting
-		buffer := make([]byte, 1024*1024) // 1MB buffer
+		buffer := make([]byte, 1024*1024)
 		for {
 			nr, er := resp.Body.Read(buffer)
 			if nr > 0 {
@@ -1046,7 +1094,6 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 				startPos += int64(nw)
 				totalWritten += int64(nw)
 
-				// Send progress updates every ~5MB
 				if progressChan != nil && totalWritten%5242880 < 1024*1024 {
 					progress := float64(totalWritten) * 100 / float64(fileSize)
 					progressChan <- ProgressUpdate{
@@ -1060,10 +1107,8 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 			}
 			if er != nil {
 				if er == io.EOF {
-					// Normal end of file
 					break
 				}
-				// Check if it's a timeout
 				if strings.Contains(er.Error(), "context deadline exceeded") ||
 					strings.Contains(er.Error(), "timeout") {
 					if progressChan != nil {
@@ -1071,13 +1116,12 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 							Status: fmt.Sprintf("Read timed out after downloading %.2f MB, will resume",
 								float64(totalWritten)/(1024*1024))}
 					}
-					break // Exit this attempt, start the next one with Range header
+					break
 				}
 				return nil, nil, er
 			}
 		}
 
-		// If we've downloaded everything or almost everything, break out of retry loop
 		if totalWritten >= fileSize || (fileSize > 0 && float64(totalWritten)/float64(fileSize) > 0.99) {
 			if progressChan != nil {
 				progressChan <- ProgressUpdate{Progress: 100,
@@ -1087,7 +1131,6 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 		}
 	}
 
-	// Flush and rewind file
 	tmpFile.Sync()
 	tmpFile.Seek(0, 0)
 
@@ -1095,16 +1138,13 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 		progressChan <- ProgressUpdate{Progress: 100, Status: "Processing artifacts ZIP file..."}
 	}
 
-	// Process the ZIP file
 	zipReader, err := zip.NewReader(tmpFile, totalWritten)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error opening zip file: %v", err)
 	}
 
-	// Extract file list and information
 	var fileList []string
 	fileInfoMap := make(map[string]FileInfo)
-	hasTraces := false
 
 	for _, file := range zipReader.File {
 		fileList = append(fileList, file.Name)
@@ -1113,19 +1153,7 @@ func downloadAndListArtifacts(client *http.Client, gitlabURL, token string, proj
 			CompressedSize: file.CompressedSize64,
 			ModTime:        file.Modified,
 		}
-
-		// Check for trace files while iterating
-		if strings.HasPrefix(file.Name, "output/trace") && strings.HasSuffix(file.Name, ".zip") {
-			hasTraces = true
-		}
 	}
-
-	if !hasTraces {
-		return nil, nil, fmt.Errorf("no trace files found in artifacts")
-	}
-
-	// Store in cache
-	fileCache.Set(projectID, jobID, fileList, fileInfoMap)
 
 	if progressChan != nil {
 		progressChan <- ProgressUpdate{Progress: 100, Status: "Processing complete"}
